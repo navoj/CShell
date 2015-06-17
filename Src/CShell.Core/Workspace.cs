@@ -35,18 +35,18 @@ namespace CShell
     public sealed partial class Workspace : PropertyChangedBase
     {
         private readonly IShell shell;
-        private readonly IReplExecutorFactory replExecutorFactory;
+        private readonly IReplScriptExecutorFactory replExecutorFactory;
 
-        private IReplExecutor replExecutor;
+        private IReplScriptExecutor replExecutor;
 
         [ImportingConstructor]
-        public Workspace(IShell shell, IReplExecutorFactory replExecutorFactory)
+        public Workspace(IShell shell, IReplScriptExecutorFactory replExecutorFactory)
         {
             this.shell = shell;
             this.replExecutorFactory = replExecutorFactory;
         }
 
-        public IReplExecutor ReplExecutor
+        public IReplScriptExecutor ReplExecutor
         {
             get { return replExecutor; }
         }
@@ -62,6 +62,9 @@ namespace CShell
                 //try to save the layout
                 SaveLayout();
             }
+
+            if(replExecutor != null)
+                replExecutor.Reset();
 
             replExecutor = null;
             WorkspaceDirectory = dir;
@@ -91,7 +94,7 @@ namespace CShell
         {
             var extension = Path.GetExtension(filePath);
             var exeDir = AppDomain.CurrentDomain.BaseDirectory;
-            var templateFile = Path.Combine(exeDir, Constants.CShellTemplatesPath, "Empty" + extension);
+            var templateFile = Path.Combine(exeDir, Constants.TemplatesPath, "Empty" + extension);
             var emptyFileText = "";
             if (File.Exists(templateFile))
                 emptyFileText = File.ReadAllText(templateFile);

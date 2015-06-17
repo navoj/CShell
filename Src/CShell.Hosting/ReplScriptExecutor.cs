@@ -4,26 +4,31 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
-using System.Runtime.Versioning;
-using System.Text;
-using System.Text.RegularExpressions;
-using Common.Logging;
 using CShell.Completion;
 using CShell.Framework.Services;
 using ScriptCs;
 using ScriptCs.Contracts;
+using ScriptCs.Logging;
 
 namespace CShell.Hosting
 {
-    public class ReplExecutor : ScriptExecutor, IReplExecutor
+    public class ReplScriptExecutor : ScriptExecutor, IReplScriptExecutor
     {
-        private readonly IRepl repl;
-        private readonly IObjectSerializer serializer;
-        private readonly IEnumerable<IReplCommand> replCommands;
+        public static readonly string[] DefaultReferencesCShell =
+        {
+            typeof(Shell).Assembly.Location, //CShell.Core
+        };
 
-        public ReplExecutor(
-            IRepl repl,
+        public static readonly string[] DefaultNamespacesCShell =
+        {
+             "CShell",
+        };
+
+        private readonly IReplOutput replOutput;
+        private readonly IObjectSerializer serializer;
+
+        public ReplScriptExecutor(
+            IReplOutput replOutput,
             IObjectSerializer serializer,
             IFileSystem fileSystem,
             IFilePreProcessor filePreProcessor,
@@ -32,15 +37,21 @@ namespace CShell.Hosting
             IEnumerable<IReplCommand> replCommands)
             : base(fileSystem, filePreProcessor, scriptEngine, logger)
         {
-            this.repl = repl;
+            this.replOutput = replOutput;
             this.serializer = serializer;
-            this.replCommands = replCommands;
+            Commands = replCommands != null ? replCommands
+                .Where(x => x.GetType().Namespace.StartsWith("CShell")) //hack to only include CShell commands for not
+                .Where(x => x.CommandName != null)
+                .ToDictionary(x => x.CommandName, x => x)
+                : new Dictionary<string, IReplCommand>();
 
             replCompletion = new CSharpCompletion(true);
             replCompletion.AddReferences(GetReferencesAsPaths());
-
             //since it's quite expensive to initialize the "System." references we clone the REPL code completion
             documentCompletion = replCompletion.Clone();
+
+            AddReferences(DefaultReferencesCShell);
+            ImportNamespaces(DefaultNamespacesCShell);
         }
 
         public string WorkspaceDirectory { get { return base.FileSystem.CurrentDirectory; } }
@@ -65,27 +76,33 @@ namespace CShell.Hosting
             get { return documentCompletion; }
         }
 
-        public IEnumerable<IReplCommand> ReplCommands
+
+        public string Buffer { get; private set; }
+
+        public Dictionary<string, IReplCommand> Commands { get; private set; }
+
+        public override void Initialize(IEnumerable<string> paths, IEnumerable<IScriptPack> scriptPacks, params string[] scriptArgs)
         {
-            get { return replCommands; }
-        } 
+            base.Initialize(paths, scriptPacks, scriptArgs);
+            ExecuteReferencesScript();
+            ExecuteConfigScript();
+        }
 
         public override ScriptResult Execute(string script, params string[] scriptArgs)
         {
-            var result = new ScriptResult();
-            repl.EvaluateStarted(script, null);
-
+            ScriptResult result = null;
             try
             {
+                replOutput.EvaluateStarted(script, null);
+
                 if (script.StartsWith(":"))
                 {
                     var tokens = script.Split(' ');
                     if (tokens[0].Length > 1)
                     {
-                        var command = replCommands.FirstOrDefault(x => x.CommandName == tokens[0].Substring(1));
-
-                        if (command != null)
+                        if (Commands.ContainsKey(tokens[0].Substring(1)))
                         {
+                            var command = Commands[tokens[0].Substring(1)];
                             var argsToPass = new List<object>();
                             foreach (var argument in tokens.Skip(1))
                             {
@@ -137,10 +154,38 @@ namespace CShell.Hosting
                         AddReferences(FileSystem.FileExists(referencePath) ? referencePath : reference);
                     }
 
-                    result = ScriptEngine.Execute(preProcessResult.Code, scriptArgs, References, Namespaces, ScriptPackSession);
+                    InjectScriptLibraries(FileSystem.CurrentDirectory, preProcessResult, ScriptPackSession.State);
 
-                    if (result != null && result.IsCompleteSubmission)
-                        PrepareVariables();
+                    Buffer = (Buffer == null)
+                        ? preProcessResult.Code
+                        : Buffer + Environment.NewLine + preProcessResult.Code;
+
+                    var namespaces = Namespaces.Union(preProcessResult.Namespaces).ToList();
+                    var references = References.Union(preProcessResult.References);
+
+                    if (preProcessResult.References != null && preProcessResult.References.Count > 0)
+                    {
+                        OnAssemblyReferencesChanged();
+                    }
+
+                    result = ScriptEngine.Execute(Buffer, scriptArgs, references, namespaces, ScriptPackSession);
+
+                    if (result == null)
+                    {
+                        result = ScriptResult.Empty;
+                    }
+                    else
+                    {
+                        if (result.InvalidNamespaces.Any())
+                        {
+                            RemoveNamespaces(result.InvalidNamespaces.ToArray());
+                        }
+
+                        if (result.IsCompleteSubmission)
+                        {
+                            Buffer = null;
+                        }
+                    }
                 }
             }
             catch (FileNotFoundException fileEx)
@@ -154,9 +199,9 @@ namespace CShell.Hosting
             }
             finally
             {
-                repl.EvaluateCompleted(result);
+                replOutput.EvaluateCompleted(result);
             }
-            return result;
+            return result ?? ScriptResult.Empty;
         }
 
 
@@ -165,8 +210,7 @@ namespace CShell.Hosting
             return string.Format(CultureInfo.InvariantCulture, "Argument is not a valid expression: {0}", argument);
         }
 
-
-        public void AddReferencesAndNotify(params Assembly[] references)
+        public override void AddReferences(params Assembly[] references)
         {
             base.AddReferences(references);
             replCompletion.AddReferences(references);
@@ -174,7 +218,7 @@ namespace CShell.Hosting
             OnAssemblyReferencesChanged();
         }
 
-        public void RemoveReferencesAndNotify(params Assembly[] references)
+        public override void RemoveReferences(params Assembly[] references)
         {
             base.RemoveReferences(references);
             replCompletion.RemoveReferences(references);
@@ -182,7 +226,7 @@ namespace CShell.Hosting
             OnAssemblyReferencesChanged();
         }
 
-        public void AddReferencesAndNotify(params string[] references)
+        public override void AddReferences(params string[] references)
         {
             base.AddReferences(references);
             replCompletion.AddReferences(references);
@@ -190,7 +234,7 @@ namespace CShell.Hosting
             OnAssemblyReferencesChanged();
         }
 
-        public void RemoveReferencesAndNotify(params string[] references)
+        public override void RemoveReferences(params string[] references)
         {
             base.RemoveReferences(references);
             replCompletion.RemoveReferences(references);
@@ -201,7 +245,7 @@ namespace CShell.Hosting
         public string[] GetReferencesAsPaths()
         {
             var paths = new List<string>();
-            paths.AddRange(References.PathReferences);
+            paths.AddRange(References.Paths);
             paths.AddRange(References.Assemblies.Select(a=>a.GetName().Name));
             return paths.ToArray();
         }
@@ -214,55 +258,53 @@ namespace CShell.Hosting
         public override void Reset()
         {
             base.Reset();
-            repl.Clear();
-        }
-
-        #region Variables
-        private string[] variables;
-        private void PrepareVariables()
-        {
-            //see: http://stackoverflow.com/questions/13056208/how-to-get-declared-variables-and-other-definitions
-            //this code has to be evaluated from within Roslyn to get the right results
-            var result = ScriptEngine.Execute("Assembly.GetExecutingAssembly().DefinedTypes", null, References, Namespaces.Concat(new[] { "System.Reflection" }), ScriptPackSession);
-            var runtimeTypes = result.ReturnValue as IEnumerable<TypeInfo>;
-            if(runtimeTypes == null)
-                return;
-
-            var variableLookup = new Dictionary<string, FieldInfo>();
-            foreach (var type in runtimeTypes.Reverse())
-            {
-                //we are only interested in actual submissions, this filters out class definitions and so on
-                if(!type.Name.StartsWith("Submission#"))
-                    continue;
-
-                foreach (var variable in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
-                {
-                    //not interested in the script host variables (which are in every submission)
-                    //only keep the first occurence of a variable, since variables can be redefined
-                    if (variable.FieldType != typeof(ReplScriptHost) && !variableLookup.ContainsKey(variable.Name))
-                        variableLookup.Add(variable.Name, variable);
-                }
-            }
-            variables = variableLookup.Select(v => v.Value.ToString()).ToArray();
-            //clean anonymous types
-            //convert the variables from general .NET generics format (List`1[int]) to C# format (List<int>)
-            var anonymousRegex = new Regex(@"\<\>f__AnonymousType[0-9]*#[0-9]*");
-            var genericsRegex = new Regex(@"\`[0-9]*\[");
-            for (int i = 0; i < variables.Length; i++)
-            {
-                variables[i] = anonymousRegex.Replace(variables[i], "AnonymousType");
-                variables[i] = genericsRegex.Replace(variables[i], "<");
-                variables[i] = variables[i].Replace(']', '>');
-            }
+            AddReferences(DefaultReferencesCShell);
+            ImportNamespaces(DefaultNamespacesCShell);
+            replOutput.Clear();
+            ExecuteReferencesScript();
         }
 
         public string[] GetVariables()
         {
-            if(variables == null)
-                return new string[0];
-            return variables;
+            var replEngine = ScriptEngine as IReplEngine;
+            if (replEngine != null)
+            {
+                var varsArray = replEngine.GetLocalVariables(ScriptPackSession)
+                    .Where(x => !x.StartsWith("submission", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                return varsArray;
+            }
+            return new string[0];
         }
-        #endregion
 
+
+        public void ExecuteConfigScript()
+        {
+            var configPath = Path.Combine(WorkspaceDirectory, CShell.Constants.ConfigFile);
+            if (File.Exists(configPath))
+            {
+                var configScript = File.ReadAllText(configPath);
+                Execute(configScript);
+            }
+        }
+
+        public void ExecuteReferencesScript()
+        {
+            var refPath = Path.Combine(WorkspaceDirectory, CShell.Constants.ReferencesFile);
+            if (File.Exists(refPath))
+            {
+                var configScript = File.ReadAllText(refPath);
+                Execute(configScript);
+            }
+
+            var binPath = Path.Combine(WorkspaceDirectory, CShell.Constants.BinFolder);
+            if (Directory.Exists(binPath))
+            {
+                var binFiles = Directory.EnumerateFiles(binPath, "*.*", SearchOption.AllDirectories)
+                    .Where(s => s.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || s.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                AddReferences(binFiles);
+            }
+        }
     }
 }

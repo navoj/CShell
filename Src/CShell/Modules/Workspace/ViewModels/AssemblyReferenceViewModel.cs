@@ -28,10 +28,10 @@ namespace CShell.Modules.Workspace.ViewModels
     public class AssemblyReferenceViewModel : TreeViewModel
     {
         private readonly string filePath;
-        private readonly IReplExecutor replExecutor;
+        private readonly IReplScriptExecutor replExecutor;
         private readonly Assembly assembly;
 
-        public AssemblyReferenceViewModel(string filePath, IReplExecutor replExecutor)
+        public AssemblyReferenceViewModel(string filePath, IReplScriptExecutor replExecutor)
         {
             if (filePath.EndsWith(".dll") || filePath.EndsWith(".exe"))
             {
@@ -50,7 +50,7 @@ namespace CShell.Modules.Workspace.ViewModels
             this.replExecutor = replExecutor;
         }
 
-        public AssemblyReferenceViewModel(Assembly assembly, IReplExecutor replExecutor)
+        public AssemblyReferenceViewModel(Assembly assembly, IReplScriptExecutor replExecutor)
         {
             this.assembly = assembly;
             assemblyName = assembly.GetName();
@@ -108,9 +108,9 @@ namespace CShell.Modules.Workspace.ViewModels
         public void Remove()
         {
             if(assembly != null)
-                replExecutor.RemoveReferencesAndNotify(assembly);
+                replExecutor.RemoveReferences(assembly);
             else
-                replExecutor.RemoveReferencesAndNotify(filePath);
+                replExecutor.RemoveReferences(filePath);
         }
     }
 }

@@ -23,11 +23,13 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms.VisualStyles;
 using System.Windows.Input;
 using System.Windows.Media;
+using Caliburn.Micro;
 using CShell.Completion;
 using CShell.Framework.Services;
 using CShell.Hosting;
@@ -37,6 +39,7 @@ using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Highlighting;
 using ICSharpCode.AvalonEdit.Rendering;
 using ICSharpCode.NRefactory.Editor;
+using ScriptCs.Contracts;
 
 namespace CShell.Modules.Repl.Controls
 {
@@ -52,11 +55,11 @@ namespace CShell.Modules.Repl.Controls
     /// <summary>
     /// Interaction logic for CommandLineControl.xaml
     /// </summary>
-    public partial class CSRepl : UserControl, IRepl
+    public partial class CSRepl : UserControl, IReplOutput
     {
         private CSReplTextEditor textEditor;
 
-        private IReplExecutor replExecutor;
+        private IReplScriptExecutor replExecutor;
         private readonly CommandHistory commandHistory;
 
         private bool executingInternalCommand;
@@ -106,10 +109,10 @@ namespace CShell.Modules.Repl.Controls
             Clear();
         }
 
-        internal IReplExecutor ReplExecutor { get { return replExecutor; } }
+        internal IReplScriptExecutor ReplExecutor { get { return replExecutor; } }
 
-        #region IRepl Interface Implementation
-        public void Initialize(IReplExecutor replExecutor)
+        #region IReplOutput Interface Implementation (key parts)
+        public void Initialize(IReplScriptExecutor replExecutor)
         {
             //unhook old executor
             this.replExecutor = replExecutor;
@@ -139,7 +142,7 @@ namespace CShell.Modules.Repl.Controls
             }
         }
 
-        public void EvaluateCompleted(global::ScriptCs.Contracts.ScriptResult result)
+        public void EvaluateCompleted(ScriptResult result)
         {
             if (!result.IsCompleteSubmission)
             {
@@ -246,6 +249,9 @@ namespace CShell.Modules.Repl.Controls
             }
 
         }
+
+        //TODO: implement repl buffer!
+        public int BufferLength { get; set; }
         #endregion
 
         #region Handle REPL Input
@@ -262,7 +268,7 @@ namespace CShell.Modules.Repl.Controls
             var input = partialCommand + Environment.NewLine + command;
             input = input.Trim();
             //todo: call execute ASYNC
-            replExecutor.Execute(input);
+            Task.Run(()=>replExecutor.Execute(input));
         }
 
         private void ShowPreviousCommand()
@@ -338,12 +344,71 @@ namespace CShell.Modules.Repl.Controls
             }
             if (key == Key.End)
             {
+                if (Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift))
+                {
+                    if (textEditor.CaretOffset >= PromptOffset)
+                    {
+                        if (textEditor.CaretOffset > textEditor.SelectionStart)
+                        {
+                            // Caret is after selection start - extend selection to end of line.
+                            textEditor.SelectionLength = Doc.TextLength - textEditor.SelectionStart;
+                        }
+                        else
+                        {
+                            // Caret is at selection start (or no selection has been made) - select
+                            // from end of current selection (if any) to end of line (if there's anything
+                            // left on the line to select).
+                            int selLen = textEditor.SelectionLength;
+                            textEditor.SelectionLength = 0;
+                            if (textEditor.SelectionStart + selLen < Doc.TextLength)
+                            { 
+                                textEditor.SelectionStart = textEditor.SelectionStart + selLen;
+                                textEditor.SelectionLength = Doc.TextLength - textEditor.SelectionStart;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // For some reason the selection isn't cleared when the user presses the end key and
+                    // the whole line is selected. It works when the selection length is less than the
+                    // length of the line though... Workaround:
+                    textEditor.SelectionLength = 0;
+                }
                 MoveCaretToEnd();
                 keyEventArgs.Handled = true;
                 return;
             }
             if (key == Key.Home)
             {
+                if (Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift))
+                {
+                    if (textEditor.CaretOffset > PromptOffset)
+                    {
+                        if (textEditor.CaretOffset == textEditor.SelectionStart)
+                        {
+                            // Caret is at selection start (or no selection has been made) - select/extend to start of line.
+                            int selLen = textEditor.SelectionStart - PromptOffset + textEditor.SelectionLength;
+                            textEditor.SelectionStart = PromptOffset;
+                            textEditor.SelectionLength = selLen;
+                        }
+                        else
+                        {
+                            // Caret is after selection start - select from start of line to 
+                            // beginning of current selection.
+                            int selLen = textEditor.SelectionStart - PromptOffset;
+                            textEditor.SelectionStart = PromptOffset;
+                            textEditor.SelectionLength = selLen;
+                        }
+                    }
+                }
+                else
+                {
+                    // For some reason the selection isn't cleared when the user presses the home key and
+                    // the whole line is selected. It works when the selection length is less than the
+                    // length of the line though... Workaround:
+                    textEditor.SelectionLength = 0;
+                }
                 MoveCaretToAfterPrompt();
                 keyEventArgs.Handled = true;
                 return;
@@ -372,13 +437,13 @@ namespace CShell.Modules.Repl.Controls
             }
         }
 
-        internal IDocument GetCompletionDocument(out int offset)
+        internal ICSharpCode.NRefactory.Editor.IDocument GetCompletionDocument(out int offset)
         {
             var lineText = GetCurrentLineText();
             var line = Doc.GetLineByOffset(Offset);
             offset = Offset - line.Offset - prompt.Length;
 
-            var vars = String.Join(Environment.NewLine, ReplExecutor.GetVariables().Select(v=>v+";"));
+            var vars = String.Join(Environment.NewLine, ReplExecutor.GetVariables().Select(v => v + ";"));
             var code = vars + lineText;
             offset += vars.Length;
             var doc = new ReadOnlyDocument(new ICSharpCode.NRefactory.Editor.StringTextSource(code), textEditor.FileName);
@@ -493,6 +558,11 @@ namespace CShell.Modules.Repl.Controls
             Write(prompt, TextType.None);
         }
 
+        public void Write(string format, params object[] arg)
+        {
+            Write(String.Format(format, arg));
+        }
+
         public void Write(string text)
         {
             Write(text, TextType.Output);
@@ -515,6 +585,11 @@ namespace CShell.Modules.Repl.Controls
         public void WriteLine()
         {
             Write(Environment.NewLine, TextType.None);
+        }
+
+        public void WriteLine(string format, params object[] arg)
+        {
+            Write(String.Format(format, arg) + Environment.NewLine);
         }
 
         public void WriteLine(string text)
@@ -549,7 +624,7 @@ namespace CShell.Modules.Repl.Controls
         }
         #endregion
 
-        #region IRepl interface, colors and fonts
+        #region IReplOutput interface, colors and fonts
         public Color GetColor(TextType textType)
         {
             switch (textType)
@@ -559,20 +634,20 @@ namespace CShell.Modules.Repl.Controls
                 case TextType.Error:
                     return ErrorColor;
                 case TextType.Repl:
-                    return ReplColor;
+                    return TextColor;
                 case TextType.Output:
                 case TextType.None:
                 default:
-                    return OutputColor;
+                    return ResultColor;
             }
         }
 
         public void ResetColor()
         {
-            OutputColor = Color.FromArgb(255, 78, 78, 78);
+            ResultColor = Color.FromArgb(255, 78, 78, 78);
             WarningColor = Color.FromArgb(255, 183, 122, 0);
             ErrorColor = Color.FromArgb(255, 138, 6, 3);
-            ReplColor = Color.FromArgb(255, 0, 127, 0);
+            TextColor = Color.FromArgb(255, 0, 127, 0);
             BackgroundColor = Colors.WhiteSmoke;
         }
 
@@ -600,10 +675,10 @@ namespace CShell.Modules.Repl.Controls
             set { textEditor.Background = new SolidColorBrush(value); }
         }
 
-        public Color OutputColor { get; set; }
+        public Color ResultColor { get; set; }
         public Color WarningColor { get; set; }
         public Color ErrorColor { get; set; }
-        public Color ReplColor { get; set; }
+        public Color TextColor { get; set; }
         #endregion
 
     }//end class

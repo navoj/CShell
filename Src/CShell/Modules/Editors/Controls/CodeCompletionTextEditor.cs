@@ -11,7 +11,7 @@ namespace CShell.Modules.Editors.Controls
 {
     public class CodeCompletionTextEditor : CodeTextEditor
     {
-        public IReplExecutor ReplExecutor { get; set; }
+        public IReplScriptExecutor ReplExecutor { get; set; }
 
         protected override string[] GetNamespaces()
         {
@@ -20,7 +20,7 @@ namespace CShell.Modules.Editors.Controls
                 var fileExtension = Path.GetExtension(FileName);
                 if (fileExtension != null && fileExtension.ToLower() == ".csx")
                 {
-                    return ReplExecutor.GetNamespaces();
+                    return ReplExecutor.Namespaces.ToArray();
                 }
             }
             return null;
